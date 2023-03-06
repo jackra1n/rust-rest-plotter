@@ -1,13 +1,13 @@
 use serde::{Deserialize, Serialize};
-use tokio_postgres::tls::NoTlsStream;
+use std::convert::Infallible;
 use std::fs::{OpenOptions, self};
-use std::io::prelude::*;
 use warp::Filter;
+use warp::http::StatusCode;
 use plotters::prelude::*;
 use tokio_postgres::{Client, Connection, NoTls, Error};
 
-
 const DATABASE_URL: &str = "postgresql://postgres:example@localhost/";
+const INIT_SQL: &str = "CreateDatabase.sql";
 
 #[derive(Serialize, Deserialize)]
 struct PerformanceTest {
@@ -23,89 +23,42 @@ async fn main() {
     // create_plot_file().expect("Couldn't create a plot file");
     // let duration = start.elapsed();
     // println!("Time elapsed in create_plot_file() is: {:?}", duration);
-
-    let (client, connection) = prepare_database().await.unwrap();
-
-    let save_test = warp::path!("commit" / String / String / i32 / i32)
-        .map(|name, branch, build, time| save_test_data(name, branch, build, time));
-
-    warp::serve(save_test)
-        .run(([127, 0, 0, 1], 7777))
-        .await;
-}
-
-async fn prepare_database() -> Result<(Client, Connection<tokio_postgres::Socket, NoTlsStream>), Error> {
     let db_url = format!("{}{}",DATABASE_URL, "PerformanceTests");
-    let (client, connection) = match tokio_postgres::connect(&db_url, NoTls).await {
-        Ok((client, connection)) => Ok((client, connection)),
-        Err(e) => {
-            if e.to_string().contains("does not exists") {
-                create_database().await
-            }
-            Err(e.into())
-        },
-    };
-
-    tokio::spawn(async move {
-        let connection_result = connection.await;
-        match connection_result {
-            Err(msg) => {
-                eprintln!("{}", msg);
-                // if (msg.to_string().contains("pat"))
-            },
-            Ok(_) => todo!(),
-        }
-    });
-
-    let sql = fs::read_to_string("CreateDatabase.sql").expect("Error while trying to read 'CreateDatabase.sql'");
-    println!("{}", &sql);
-    client.batch_execute(&sql).await?;
-    let (client2, connection2) = tokio_postgres::connect(&db_url, NoTls)
+    let (client, connection) = tokio_postgres::connect(&db_url, NoTls)
         .await
-        .unwrap();
-    Ok((client2, connection2))
-}
+        .expect("Failed to connect to Postgres");
 
-// fn 
-
-async fn create_database() -> Result<(Client, Connection<tokio_postgres::Socket, NoTlsStream>), Error> {
-    let (client, connection) = tokio_postgres::connect(DATABASE_URL, NoTls)
-        .await
-        .unwrap();
-    
     tokio::spawn(async move {
         if let Err(e) = connection.await {
             eprintln!("connection error: {}", e);
         }
     });
 
-    let db_creation = client.execute("CREATE DATABASE PerformanceTests", &[]).await;
-    if let Err(msg) = db_creation {
-        if !msg.to_string().contains("already exists") {
-            println!("Couldnt create database: {}", msg)
-        }
-    }
-    let (new_client, new_connection) = tokio_postgres::connect(DATABASE_URL, NoTls)
-        .await
-        .unwrap();
-    Ok((new_client, new_connection))
+    let sql = fs::read_to_string(INIT_SQL).expect("Error while trying to read 'CreateDatabase.sql'");
+    client.batch_execute(&sql).await.expect("Couldnt execute sql statement");
+
+    let save_test_endpoint = warp::path!("commit" / String / String / i32 / i32)
+        .and_then(save_test_data);
+
+    warp::serve(save_test_endpoint)
+        .run(([127, 0, 0, 1], 7777))
+        .await;
 }
 
-fn save_test_data(name: String, branch: String, build_number: i32, time: i32) -> &'static str {
-    let test = PerformanceTest { name, branch, build_number, time };
+async fn create_connection() -> Result<Client, Error> {
+    let db_url = format!("{}{}",DATABASE_URL, "PerformanceTests");
+    let (client, conn) = tokio_postgres::connect(&db_url, NoTls).await.expect("connect");
+    tokio::spawn(conn);
+    Ok(client)
+}
 
-    let mut file_name: String = test.name.to_owned();
-    file_name.push_str(".json");
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .append(true)
-        .open(file_name)
-        .expect("Unable to open file");
+pub async fn save_test_data(name: String, branch: String, build_number: i32, time: i32) -> Result<impl warp::Reply, Infallible> {
+    let client = create_connection().await.unwrap();
+    // let query = "INSERT INTO DefaultTests(name, branch, build_number, runtime) VALUES ($1, $2, $3, $4)";
+    let query = format!("INSERT INTO DefaultTests(name, branch, build_number, runtime) VALUES ('{}', '{}', {}, interval '{} seconds')", name, branch, build_number, time);
+    client.execute(&query, &[]).await.expect("Couldnt insert into DB");
 
-    let json = serde_json::to_string(&test).expect("Unable to serialize Person");
-    writeln!(file, "{}", json).expect("Unable to write to file");
-    return "hello";
+    Ok(StatusCode::OK)
 }
 
 fn create_plot_file() -> Result<(), Box<dyn std::error::Error>> {
