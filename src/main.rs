@@ -1,10 +1,12 @@
 use serde::{Deserialize, Serialize};
-use std::fs::OpenOptions;
+use std::fs::{OpenOptions, self};
 use std::io::prelude::*;
 use warp::Filter;
 use plotters::prelude::*;
-use tokio_postgres::NoTls;
+use tokio_postgres::{Client, NoTls, Error};
 
+
+const DATABASE_URL: &str = "postgresql://postgres:example@localhost/";
 
 #[derive(Serialize, Deserialize)]
 struct PerformanceTest {
@@ -22,7 +24,7 @@ async fn main() {
     // println!("Time elapsed in create_plot_file() is: {:?}", duration);
 
     let (client, connection) =
-        tokio_postgres::connect("postgresql://postgres:example@localhost/", NoTls)
+        tokio_postgres::connect(DATABASE_URL, NoTls)
         .await
         .unwrap();
 
@@ -32,6 +34,8 @@ async fn main() {
         }
     });
 
+    prepare_database(&client).await.unwrap();
+
     let save_test = warp::path!("commit" / String / String / i32 / i32)
         .map(|name, branch, build, time| save_test_data(name, branch, build, time));
 
@@ -40,10 +44,17 @@ async fn main() {
         .await;
 }
 
-async fn prepare_database(client: &Client, db_name: &str) -> Result<(), Error> {
-    let query = format!("CREATE DATABASE IF NOT EXISTS {}", db_name);
-    client.execute(&query, &[]).await?;
-    client.execute("CREATE DATABASE PerformanceTests", &[]).await.unwrap();
+async fn prepare_database(client: &Client) -> Result<(), Error> {
+    let db_creation = client.execute("CREATE DATABASE PerformanceTests", &[]).await;
+    if let Err(msg) = db_creation {
+        if !msg.to_string().contains("already exists") {
+            println!("Couldnt create database: {}", msg)
+        }
+    }
+
+    let sql = fs::read_to_string("CreateDatabase.sql").expect("Error while trying to read 'CreateDatabase.sql'");
+    println!("{}", &sql);
+    client.batch_execute(&sql).await?;
     Ok(())
 }
 
@@ -77,12 +88,12 @@ fn create_plot_file() -> Result<(), Box<dyn std::error::Error>> {
         .build_cartesian_2d(30.0f32..40.0f32, 0.0f32..100.0f32)?;
 
     chart.configure_mesh()
-    .disable_x_mesh()
-    .disable_y_mesh()
-    .x_labels(30)
-    .max_light_lines(4)
-    .y_desc("Execution Time [ms]")
-    .draw()?;
+        .disable_x_mesh()
+        .disable_y_mesh()
+        .x_labels(30)
+        .max_light_lines(4)
+        .y_desc("Execution Time [ms]")
+        .draw()?;
 
     chart.draw_series(LineSeries::new(
         DATA.iter().map(|(x, y)| (*x, *y)),
