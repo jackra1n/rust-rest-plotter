@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
+use tokio_postgres::tls::NoTlsStream;
 use std::fs::{OpenOptions, self};
 use std::io::prelude::*;
 use warp::Filter;
 use plotters::prelude::*;
-use tokio_postgres::{Client, NoTls, Error};
+use tokio_postgres::{Client, Connection, NoTls, Error};
 
 
 const DATABASE_URL: &str = "postgresql://postgres:example@localhost/";
@@ -23,18 +24,7 @@ async fn main() {
     // let duration = start.elapsed();
     // println!("Time elapsed in create_plot_file() is: {:?}", duration);
 
-    let (client, connection) =
-        tokio_postgres::connect(DATABASE_URL, NoTls)
-        .await
-        .unwrap();
-
-    tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            eprintln!("connection error: {}", e);
-        }
-    });
-
-    prepare_database(&client).await.unwrap();
+    let (client, connection) = prepare_database().await.unwrap();
 
     let save_test = warp::path!("commit" / String / String / i32 / i32)
         .map(|name, branch, build, time| save_test_data(name, branch, build, time));
@@ -44,18 +34,61 @@ async fn main() {
         .await;
 }
 
-async fn prepare_database(client: &Client) -> Result<(), Error> {
+async fn prepare_database() -> Result<(Client, Connection<tokio_postgres::Socket, NoTlsStream>), Error> {
+    let db_url = format!("{}{}",DATABASE_URL, "PerformanceTests");
+    let (client, connection) = match tokio_postgres::connect(&db_url, NoTls).await {
+        Ok((client, connection)) => Ok((client, connection)),
+        Err(e) => {
+            if e.to_string().contains("does not exists") {
+                create_database().await
+            }
+            Err(e.into())
+        },
+    };
+
+    tokio::spawn(async move {
+        let connection_result = connection.await;
+        match connection_result {
+            Err(msg) => {
+                eprintln!("{}", msg);
+                // if (msg.to_string().contains("pat"))
+            },
+            Ok(_) => todo!(),
+        }
+    });
+
+    let sql = fs::read_to_string("CreateDatabase.sql").expect("Error while trying to read 'CreateDatabase.sql'");
+    println!("{}", &sql);
+    client.batch_execute(&sql).await?;
+    let (client2, connection2) = tokio_postgres::connect(&db_url, NoTls)
+        .await
+        .unwrap();
+    Ok((client2, connection2))
+}
+
+// fn 
+
+async fn create_database() -> Result<(Client, Connection<tokio_postgres::Socket, NoTlsStream>), Error> {
+    let (client, connection) = tokio_postgres::connect(DATABASE_URL, NoTls)
+        .await
+        .unwrap();
+    
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            eprintln!("connection error: {}", e);
+        }
+    });
+
     let db_creation = client.execute("CREATE DATABASE PerformanceTests", &[]).await;
     if let Err(msg) = db_creation {
         if !msg.to_string().contains("already exists") {
             println!("Couldnt create database: {}", msg)
         }
     }
-
-    let sql = fs::read_to_string("CreateDatabase.sql").expect("Error while trying to read 'CreateDatabase.sql'");
-    println!("{}", &sql);
-    client.batch_execute(&sql).await?;
-    Ok(())
+    let (new_client, new_connection) = tokio_postgres::connect(DATABASE_URL, NoTls)
+        .await
+        .unwrap();
+    Ok((new_client, new_connection))
 }
 
 fn save_test_data(name: String, branch: String, build_number: i32, time: i32) -> &'static str {
