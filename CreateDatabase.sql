@@ -3,5 +3,6 @@ CREATE TABLE IF NOT EXISTS DefaultTests (
   name VARCHAR(255),
   branch VARCHAR(255),
   build_number BIGINT,
-  runtime INTERVAL
+  runtime BIGINT,
+  UNIQUE (name, branch, build_number)
 )

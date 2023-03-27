@@ -1,10 +1,12 @@
 use serde::{Deserialize, Serialize};
-use std::convert::Infallible;
-use std::fs::{OpenOptions, self};
+use std::{convert::Infallible};
+use std::fs;
 use warp::Filter;
 use warp::http::StatusCode;
 use plotters::prelude::*;
-use tokio_postgres::{Client, Connection, NoTls, Error};
+use tokio_postgres::{Client, NoTls};
+
+
 
 const DATABASE_URL: &str = "postgresql://postgres:example@localhost/";
 const INIT_SQL: &str = "CreateDatabase.sql";
@@ -13,16 +15,13 @@ const INIT_SQL: &str = "CreateDatabase.sql";
 struct PerformanceTest {
     name: String,
     branch: String,
-    build_number: i32,
-    time: i32,
+    build_number: i64,
+    time: i64,
 }
+
 
 #[tokio::main]
 async fn main() {
-    // let start = Instant::now();
-    // create_plot_file().expect("Couldn't create a plot file");
-    // let duration = start.elapsed();
-    // println!("Time elapsed in create_plot_file() is: {:?}", duration);
     let db_url = format!("{}{}",DATABASE_URL, "PerformanceTests");
     let (client, connection) = tokio_postgres::connect(&db_url, NoTls)
         .await
@@ -37,32 +36,79 @@ async fn main() {
     let sql = fs::read_to_string(INIT_SQL).expect("Error while trying to read 'CreateDatabase.sql'");
     client.batch_execute(&sql).await.expect("Couldnt execute sql statement");
 
-    let save_test_endpoint = warp::path!("commit" / String / String / i32 / i32)
+    let save_test_endpoint = warp::path!("commit" / String / String / i64 / i64)
         .and_then(save_test_data);
 
-    warp::serve(save_test_endpoint)
+    let show_test_endpoint = warp::path!("show")
+        .and_then(show_test_data);
+
+    let show_plot_endpoint = warp::path!("plot")
+        .and_then(show_plot);
+
+    let app = save_test_endpoint.or(show_test_endpoint).or(show_plot_endpoint);
+
+    warp::serve(app)
         .run(([127, 0, 0, 1], 7777))
         .await;
 }
 
-async fn create_connection() -> Result<Client, Error> {
+async fn create_connection() -> Result<Client, tokio_postgres::Error> {
     let db_url = format!("{}{}",DATABASE_URL, "PerformanceTests");
-    let (client, conn) = tokio_postgres::connect(&db_url, NoTls).await.expect("connect");
+    let (client, conn) = tokio_postgres::connect(&db_url, NoTls).await.expect("connection error");
     tokio::spawn(conn);
     Ok(client)
 }
 
-pub async fn save_test_data(name: String, branch: String, build_number: i32, time: i32) -> Result<impl warp::Reply, Infallible> {
+pub async fn show_test_data() -> Result<impl warp::Reply, Infallible> {
     let client = create_connection().await.unwrap();
-    // let query = "INSERT INTO DefaultTests(name, branch, build_number, runtime) VALUES ($1, $2, $3, $4)";
-    let query = format!("INSERT INTO DefaultTests(name, branch, build_number, runtime) VALUES ('{}', '{}', {}, interval '{} seconds')", name, branch, build_number, time);
-    client.execute(&query, &[]).await.expect("Couldnt insert into DB");
-
-    Ok(StatusCode::OK)
+    let query = "SELECT * FROM DefaultTests";
+    let rows = client.query(query, &[]).await.expect("Select query did not succeed");
+    
+    let mut tests: Vec<PerformanceTest> = Vec::new();
+    for row in rows {
+        let test = PerformanceTest {
+            name: row.get("name"),
+            branch: row.get("branch"),
+            build_number: row.get("build_number"),
+            time: row.get("runtime"),
+        };
+        tests.push(test);
+    }
+    Ok(warp::reply::with_status(
+        warp::reply::json(&tests),
+        StatusCode::OK,
+    ))
 }
 
-fn create_plot_file() -> Result<(), Box<dyn std::error::Error>> {
-    let root = BitMapBackend::new("myPlot.png", (1000, 1000)).into_drawing_area();
+pub async fn save_test_data(name: String, branch: String, build_number: i64, time: i64) -> Result<impl warp::Reply, Infallible> {
+    let client = create_connection().await.unwrap();
+    let query = "INSERT INTO DefaultTests(name, branch, build_number, runtime) VALUES ($1, $2, $3, $4)";
+    let result = client.execute(query, &[&name, &branch, &build_number, &time]).await;
+    match result {
+        Ok(_) => Ok(warp::reply::with_status(
+            "inserting was succesfull",
+            StatusCode::OK,
+        )),
+        Err(_) => Ok(warp::reply::with_status(
+            "fail",
+            StatusCode::METHOD_NOT_ALLOWED,
+        ))
+    }
+}
+
+pub async fn show_plot() -> Result<impl warp::Reply, Infallible> {
+    let plot_name = "plot.png";
+    create_plot_file(plot_name.to_owned()).unwrap();
+    let plot = fs::read(plot_name).unwrap();
+    Ok(warp::reply::with_status(
+        warp::reply::with_header(plot, "Content-Type", "image/png"),
+        StatusCode::OK,
+    ))
+}
+
+#[allow(dead_code)]
+fn create_plot_file(file_name: String) -> Result<(), Box<dyn std::error::Error>> {
+    let root = BitMapBackend::new(&file_name, (1000, 1000)).into_drawing_area();
 
     root.fill(&WHITE)?;
 
