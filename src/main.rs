@@ -97,8 +97,14 @@ pub async fn save_test_data(name: String, branch: String, build_number: i64, tim
 }
 
 pub async fn show_plot() -> Result<impl warp::Reply, Infallible> {
+    let client = create_connection().await.unwrap();
+    let query = "SELECT * FROM DefaultTests";
+    let rows = client.query(query, &[]).await.expect("Select query did not succeed");
+
+    let prepared_data = rows.iter().map(|row| (row.get("build_number"), row.get("runtime"))).collect();
+
     let plot_name = "plot.png";
-    create_plot_file(plot_name.to_owned()).unwrap();
+    create_plot_file(plot_name.to_owned(), prepared_data).unwrap();
     let plot = fs::read(plot_name).unwrap();
     Ok(warp::reply::with_status(
         warp::reply::with_header(plot, "Content-Type", "image/png"),
@@ -106,8 +112,7 @@ pub async fn show_plot() -> Result<impl warp::Reply, Infallible> {
     ))
 }
 
-#[allow(dead_code)]
-fn create_plot_file(file_name: String) -> Result<(), Box<dyn std::error::Error>> {
+fn create_plot_file(file_name: String, data: Vec<(i64, i64)>) -> Result<(), Box<dyn std::error::Error>> {
     let root = BitMapBackend::new(&file_name, (1000, 1000)).into_drawing_area();
 
     root.fill(&WHITE)?;
@@ -117,7 +122,7 @@ fn create_plot_file(file_name: String) -> Result<(), Box<dyn std::error::Error>>
         .set_label_area_size(LabelAreaPosition::Left, 60)
         .set_label_area_size(LabelAreaPosition::Bottom, 60)
         .caption("Performance Chart Demo", ("sans-serif", 40))
-        .build_cartesian_2d(30.0f32..40.0f32, 0.0f32..100.0f32)?;
+        .build_cartesian_2d(30i64..40i64, 0i64..2500i64)?;
 
     chart.configure_mesh()
         .disable_x_mesh()
@@ -128,25 +133,12 @@ fn create_plot_file(file_name: String) -> Result<(), Box<dyn std::error::Error>>
         .draw()?;
 
     chart.draw_series(LineSeries::new(
-        DATA.iter().map(|(x, y)| (*x, *y)),
+        data.iter().map(|(x, y)| (*x, *y)),
         &BLUE,
     ))?;
     chart.draw_series(
-        DATA.iter()
+        data.iter()
             .map(|(y, m)| Circle::new((*y, *m), 5, BLUE.filled())),
     )?;
     Ok(())
 }
-
-const DATA: [(f32, f32); 10] = [
-    (30.0, 32.4),
-    (31.0, 37.5),
-    (32.0, 44.5),
-    (33.0, 50.3),
-    (34.0, 55.0),
-    (35.0, 70.0),
-    (36.0, 78.7),
-    (37.0, 76.5),
-    (38.0, 68.9),
-    (39.0, 56.3),
-];
