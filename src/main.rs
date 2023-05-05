@@ -4,8 +4,10 @@ use std::fs;
 use warp::Filter;
 use warp::http::StatusCode;
 use plotters::prelude::*;
-use tokio_postgres::{Client, NoTls};
+use tokio_postgres::{connect, Client, NoTls};
+extern crate pretty_env_logger;
 
+#[macro_use] extern crate log;
 
 
 const DATABASE_URL: &str = "postgresql://postgres:example@localhost/";
@@ -22,18 +24,17 @@ struct PerformanceTest {
 
 #[tokio::main]
 async fn main() {
+    pretty_env_logger::init();
     let db_url = format!("{}{}",DATABASE_URL, "PerformanceTests");
-    let (client, connection) = tokio_postgres::connect(&db_url, NoTls)
-        .await
-        .expect("Failed to connect to Postgres");
-
+    let (client, connection) = connect(&db_url, NoTls).await.expect("connection error");
+ 
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            eprintln!("connection error: {}", e);
+            error!("connection error: {}", e);
         }
     });
 
-    let sql = fs::read_to_string(INIT_SQL).expect("Error while trying to read 'CreateDatabase.sql'");
+    let sql = fs::read_to_string(INIT_SQL).unwrap();
     client.batch_execute(&sql).await.expect("Couldnt execute sql statement");
 
     let save_test_endpoint = warp::path!("commit" / String / String / i64 / i64)
